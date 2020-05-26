@@ -1,0 +1,220 @@
+BootStrap: docker
+From: centos:7.7.1908
+
+%labels
+  author "ACADA-SAG Team"
+  version "1.1"
+
+%setup
+ #commands are executed on the host system outside of the container after the base OS has been installed
+
+ #copy here the file used to source environments
+ mkdir -p ${SINGULARITY_ROOTFS}/opt/module
+
+ #copy here temporary configuration files that must be moved during the post step
+ mkdir -p ${SINGULARITY_ROOTFS}/opt/conf
+ mkdir -p ${SINGULARITY_ROOTFS}/opt/prod
+ mkdir -p ${SINGULARITY_ROOTFS}/opt/dev
+ mkdir -p ${SINGULARITY_ROOTFS}/opt/start
+
+ #copy here temporary src files for installation that must be removed after the installation
+ mkdir -p ${SINGULARITY_ROOTFS}/usr/local/src
+
+ #input and output
+ mkdir -p ${SINGULARITY_ROOTFS}/ANALYSIS3
+ mkdir -p ${SINGULARITY_ROOTFS}/ANALYSIS3/log
+ mkdir -p ${SINGULARITY_ROOTFS}/DATAINPUT
+
+ mkdir -p ${SINGULARITY_ROOTFS}/data01
+ mkdir -p ${SINGULARITY_ROOTFS}/data02
+ mkdir -p ${SINGULARITY_ROOTFS}/data03
+
+%files
+ #to copy files from your host system into the container
+ #Each line is a pair of <source> and <destination>, where the source is a path on your host system, and the destination is a path in the container.
+ #Files are copied before any %post or installation procedures
+
+ environment.yml /opt/conf/
+
+%post
+
+  yum -y install epel-release rsync unzip bzip2
+
+  yum -y install git make gcc gcc-c++ binutils\
+                 libX11-devel libXpm-devel libXft-devel libXext-devel
+
+
+  yum -y install curl less vim wget bc which
+
+  yum -y install man-pages man-db man
+
+  yum -y install htop
+
+  SRC_DIR="/usr/local/src"
+  test -d $SRC_DIR || mkdir -p $SRC_DIR
+
+  INSTALL_PREFIX=/usr/local
+  #export MAKEFLAGS=-j64
+
+  echo "Install anaconda 2020.02 x86_64"
+  cd $SRC_DIR
+  wget -q   https://repo.anaconda.com/archive/Anaconda3-2020.02-Linux-x86_64.sh
+  echo "2b9f088b2022edb474915d9f69a803d6449d5fdb4c303041f60ac4aefcc208bb  Anaconda3-2020.02-Linux-x86_64.sh" > anaconda_hash_sha256
+  sha256sum -c anaconda_hash_sha256
+  bash Anaconda3-2020.02-Linux-x86_64.sh -b -p /opt/anaconda3.7
+  ln -s /opt/anaconda3.7/etc/profile.d/conda.sh /etc/profile.d/conda.sh
+
+  echo "export PATH=/opt/anaconda3.7/bin:$PATH \nunset PYTHONPATH\nexport LD_LIBRARY_PATH=/opt/anaconda3.7/lib:$LD_LIBRARY_PATH" > /opt/module/anaconda-3.7
+
+  # cmake (from source)
+  cd $SRC_DIR
+  wget https://cmake.org/files/v3.15/cmake-3.15.5.tar.gz
+  tar zxvf cmake-3.*
+  cd cmake-3.*
+  ./bootstrap --prefix=/usr/local
+  make -j$(nproc)
+  make install
+  cd ..
+
+  # hdf5 software libraries
+  wget https://support.hdfgroup.org/ftp/HDF5/releases/hdf5-1.10/hdf5-1.10.5/src/CMake-hdf5-1.10.5.tar.gz
+  tar -xzvf CMake-hdf5-1.10.5.tar.gz
+  mkdir CMake-hdf5-1.10.5-build
+  mkdir /opt/prod/hdf5-1.10.5
+
+  cd CMake-hdf5-1.10.5-build
+  cmake -C ../CMake-hdf5-1.10.5/hdf5-1.10.5/config/cmake/cacheinit.cmake  \
+        -G "Unix Makefiles" \
+        -DHDF5_BUILD_CPP_LIB:BOOL=ON \
+        -DHDF5_ENABLE_THREADSAFE:BOOL=OFF \
+        -DHDF5_BUILD_FORTRAN:BOOL=OFF \
+        -DHDF5_ENABLE_SZIP_SUPPORT:BOOL=OFF \
+        -DHDF5_ENABLE_Z_LIB_SUPPORT:BOOL=OFF \
+        -DBUILD_TESTING:BOOL=OFF \
+        -DCMAKE_BUILD_TYPE:STRING=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/prod/hdf5-1.10.5  \
+        ../CMake-hdf5-1.10.5/hdf5-1.10.5/
+
+  cmake --build . --config Release
+  make install
+
+
+  #remove files
+
+  ## INSTALL SERVICES
+  yum -y install deltarpm perl net-tools libaio perl-Getopt-Long numactl-libs
+
+  localedef -i en_US -f UTF-8 en_US.UTF-8
+
+  export MUNGEUSER=991
+  groupadd -g $MUNGEUSER munge
+  useradd  -m -c "MUNGE Uid 'N' Gid Emporium" -d /var/lib/munge -u $MUNGEUSER -g munge  -s /sbin/nologin munge
+  export SLURMUSER=992
+  groupadd -g $SLURMUSER slurm
+  useradd  -m -c "SLURM workload manager" -d /var/lib/slurm -u $SLURMUSER -g slurm  -s /bin/bash slurm
+
+  yum -y install munge munge-libs munge-devel
+
+  yum -y install rng-tools
+  rngd -r /dev/urandom
+
+  /usr/sbin/create-munge-key -r
+  dd if=/dev/urandom bs=1 count=1024 > /etc/munge/munge.key
+  chown -R munge: /etc/munge/ /var/log/munge/
+  chmod 0400 /etc/munge/munge.key
+  chmod 0700 /etc/munge/ /var/log/munge/
+
+  # install software distros
+  SRC_DIR="/usr/local/src"
+  test -d $SRC_DIR || mkdir -p $SRC_DIR
+
+  # mysqld
+  cd $SRC_DIR
+  MYSQL_RPMS="mysql-community-server-5.7.24-1.el7.x86_64.rpm
+              mysql-community-client-5.7.24-1.el7.x86_64.rpm
+              mysql-community-common-5.7.24-1.el7.x86_64.rpm
+              mysql-community-libs-5.7.24-1.el7.x86_64.rpm
+              mysql-community-devel-5.7.24-1.el7.x86_64.rpm"
+  for rpm_file in $MYSQL_RPMS; do
+    wget "https://dev.mysql.com/get/Downloads/MySQL-5.7/$rpm_file"
+  done
+  cat <<EOF >> $SRC_DIR/mysql_hash_md5
+6ef92158238cd2dd8a7b74f85c62490d  mysql-community-server-5.7.24-1.el7.x86_64.rpm
+8044968ba1cdce487baf7b2d5ec42629  mysql-community-devel-5.7.24-1.el7.x86_64.rpm
+daac5b7147949351aed38995c647194b  mysql-community-client-5.7.24-1.el7.x86_64.rpm
+5f10843255b1987acbc89a7d1c3a18af  mysql-community-common-5.7.24-1.el7.x86_64.rpm
+ba4058a9233d7a1d33b77283798dcdea  mysql-community-libs-5.7.24-1.el7.x86_64.rpm
+EOF
+
+  md5sum -c mysql_hash_md5
+  rpm -ivh $MYSQL_RPMS
+
+  sed -e '/^log-error=/ s/^/# /' \
+      -e '/log-error=/a log-error=/var/log/mysqld/mysqld.log' \
+      -i /etc/my.cnf
+
+
+  yum -y install openssl openssl-devel pam-devel numactl numactl-devel hwloc hwloc-devel lua lua-devel readline-devel rrdtool-devel ncurses-devel man2html libibmad libibumad
+  yum -y install rpm-build perl-ExtUtils-MakeMaker
+  yum -y groupinstall "Development Tools"
+
+  cd $SRC_DIR
+  wget https://download.schedmd.com/slurm/slurm-17.11.12.tar.bz2
+  echo "42f0a5dbe34210283f474328ac6e8d5267dc2386 slurm-17.11.12.tar.bz2" > slurm_hash_sha1
+  sha1sum -c slurm_hash_sha1
+  rpmbuild -ta slurm-17.11.12.tar.bz2
+  yum -y --nogpgcheck localinstall /root/rpmbuild/RPMS/x86_64/slurm-*rpm
+
+  # filesystem fix
+  mkdir -p /var/lib/{mysql,munge,slurm}
+  mkdir -p /var/log/{mysqld,munge,slurm}
+  mkdir -p /var/run/{mysqld,munge,slurm}
+  mkdir -p /var/spool/{slurm,slurmd}
+
+  chown slurm:slurm /var/{log,spool}/slurm
+  chmod 0755 /var/{lib,log,run}/munge
+  # change munge key permission so we can start it as normal user with munged -f
+  chmod 0755 /etc/munge/
+  chmod 0444 /etc/munge/munge.key
+
+
+  #### CREATE Anaconda Container
+
+  export PATH=/opt/anaconda3.7/bin:${PATH}
+
+  conda env create -n acada_sag -f /opt/conf/environment.yml
+  source activate acada_sag
+
+  cd $SRC_DIR
+  conda skeleton pypi inotify --version 0.2.10
+  conda-build inotify
+  conda install -y --use-local inotify
+
+  source deactivate
+
+
+  # remove source
+  rm -rf $SRC_DIR
+
+cat << EOF > /etc/profile.d/custom_rta_bash.sh
+          alias ls='ls --color'
+          alias ll='ls --color -latr'
+          alias la='ls --color -A'
+EOF
+
+  rm -rf $SRC_DIR
+
+
+%environment
+
+  PATH="/opt/anaconda3.7/bin:${PATH}"
+  export PATH
+  export HDF_INSTALL=/opt/prod/hdf5-1.10.5
+  export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/prod/hdf5-1.10.5/lib"
+
+  # Enabling python environment...
+  #source /etc/profile.d/conda.sh
+  SINGULARITY_SHELL="/bin/bash"
+
+
+%help

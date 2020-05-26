@@ -1,0 +1,2 @@
+rm -rf acada_sag_container_lv1.simg
+singularity build acada_sag_container_lv1.simg acada_sag_container_lv1.recipe
